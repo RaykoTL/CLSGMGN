@@ -24,8 +24,15 @@ VENTANA_TIEMPO = 1800 # 30 minutos
 def enviar_telegram(mensaje):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown", "disable_web_page_preview": False})
-    except: pass
+        payload = {
+            "chat_id": CHAT_ID, 
+            "text": mensaje, 
+            "parse_mode": "Markdown", 
+            "disable_web_page_preview": False
+        }
+        requests.post(url, json=payload)
+    except: 
+        pass
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
@@ -35,7 +42,7 @@ def webhook():
         
         # Respuesta manual para confirmar que vive
         if isinstance(data, dict) and "message" in data:
-            enviar_telegram("📡 *Radar Nivel 3 Activo.*\nAnalizando flujos directos de tokens.")
+            enviar_telegram("📡 *Radar Nivel 3 Activo.*\nFiltrando SOL/USDC. Analizando tokens nuevos.")
             return "OK", 200
 
         # Helius envía una lista de transacciones
@@ -43,7 +50,7 @@ def webhook():
             # 1. ¿Quién es el responsable?
             comprador = tx.get('feePayer')
             if comprador not in WALLETS:
-                continue # Si no es uno de los nuestros, ignorar
+                continue 
                 
             nombre = WALLETS[comprador]
             
@@ -53,30 +60,44 @@ def webhook():
                     # Si el token va hacia nuestra wallet, es una adquisición
                     if tf.get('toUserAccount') == comprador:
                         token_ca = tf.get('mint')
-                        # Ignorar SOL y USDC/USDT comunes
-                        if token_ca in ["So11111111111111111111111111111111111111112", "EPjFW36vn7J989kz5j1B1wvQ7bbjkneX9W8hzU31be52"]:
+                        
+                        # --- FILTRO DE MONEDAS BASE (Para evitar spam de SOL) ---
+                        # Ignoramos: SOL, Wrapped SOL, USDC y USDT
+                        monedas_base = [
+                            "So11111111111111111111111111111111111111112", 
+                            "11111111111111111111111111111111",
+                            "EPjFW36vn7J989kz5j1B1wvQ7bbjkneX9W8hzU31be52",
+                            "Es9vMFrzaDCSTMdUiJcxKsM45fvBYgxQSJJqmohcvnJ"
+                        ]
+                        
+                        if token_ca in monedas_base:
                             continue
                             
                         ahora = time.time()
                         tracker[token_ca].append({'wallet': nombre, 'time': ahora})
                         
-                        # Limpiar antiguos
+                        # Limpiar registros antiguos de este token
                         tracker[token_ca] = [t for t in tracker[token_ca] if ahora - t['time'] < VENTANA_TIEMPO]
                         
                         ops = list(set(t['wallet'] for t in tracker[token_ca]))
-                        print(f"ALERTA INTERNA: {nombre} adquirió {token_ca}. Confluencia actual: {len(ops)}")
+                        
+                        # Log para ver en Render qué está pasando
+                        print(f"LECTURA: {nombre} compró {token_ca}. Equipo: {len(ops)}")
 
                         if len(ops) >= 2:
-                            msg = (f"🚨 *CONFLUENCIA DE ALTA PROBABILIDAD*\n\n"
+                            msg = (f"🚨 *CONFLUENCIA DETECTADA*\n\n"
                                    f"💎 *Token:* `{token_ca}`\n"
                                    f"👥 *Equipo:* {', '.join(ops)}\n"
+                                   f"⏱️ *Ventana:* 30 min\n\n"
                                    f"🔗 [DexScreener](https://dexscreener.com/solana/{token_ca})")
                             enviar_telegram(msg)
-                            # Limpiamos para no repetir la alerta cada segundo
+                            
+                            # Limpiamos para no repetir la alerta inmediatamente
                             tracker[token_ca] = [] 
         
         return "OK", 200
     return "OK", 200
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
