@@ -6,7 +6,6 @@ from collections import defaultdict
 
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN ---
 TOKEN = "8332101681:AAEbroUVbM_DkjhcuK-3onb095PpmFuCeyU"
 CHAT_ID = "6120143616"
 
@@ -19,57 +18,61 @@ WALLETS = {
 }
 
 tracker = defaultdict(list)
-# Aumentamos a 1200 segundos (20 minutos) para no perder confluencias lentas
-VENTANA_TIEMPO = 1200 
+VENTANA_TIEMPO = 1800 # Subimos a 30 minutos para mayor seguridad
 
 def enviar_telegram(mensaje):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"Error enviando a Telegram: {e}")
+        requests.post(url, json={"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown", "disable_web_page_preview": False})
+    except: pass
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
     if request.method == 'POST':
         data = request.json
         if not data: return "OK", 200
-
-        # Respuesta a mensajes manuales
+        
+        # Respuesta manual
         if "message" in data:
-            enviar_telegram("✅ *Sistema Activo*\nVentana: 20 min.\nCarteras: 5")
+            enviar_telegram("📡 *Radar Reforzado:* Activo y rastreando.")
             return "OK", 200
 
         for tx in data:
-            if 'events' in tx and 'swap' in tx['events']:
-                swap = tx['events']['swap']
-                token_ca = swap.get('tokenOutMint')
+            # 1. Identificar si alguno de nuestros operadores está en la transacción
+            account_keys = [acc.get('pubkey') for acc in tx.get('accountData', [])]
+            operador_encontrado = None
+            for w_addr, w_nombre in WALLETS.items():
+                if w_addr in account_keys or tx.get('feePayer') == w_addr:
+                    operador_encontrado = w_nombre
+                    break
+            
+            if operador_encontrado:
+                # 2. Buscar qué token salió de la cuenta (Compra)
+                token_ca = None
+                if 'tokenTransfers' in tx:
+                    for transfer in tx['tokenTransfers']:
+                        # Si el operador es el que RECIBE el token, es una compra
+                        if transfer.get('toUserAccount') in account_keys or transfer.get('toUserAccount') == tx.get('feePayer'):
+                            token_ca = transfer.get('mint')
+                            break
                 
-                # Filtro: Solo compras con SOL
-                if swap.get('tokenInMint') == "So11111111111111111111111111111111111111112":
-                    comprador = tx.get('feePayer')
-                    nombre = WALLETS.get(comprador, "OP_DESCONOCIDO")
+                if token_ca:
                     ahora = time.time()
-
-                    # GUARDAR Y LIMPIAR
-                    tracker[token_ca].append({'wallet': nombre, 'time': ahora})
+                    tracker[token_ca].append({'wallet': operador_encontrado, 'time': ahora})
                     tracker[token_ca] = [t for t in tracker[token_ca] if ahora - t['time'] < VENTANA_TIEMPO]
                     
                     ops = list(set(t['wallet'] for t in tracker[token_ca]))
-                    
-                    # LOG PARA REVISIÓN (Aparecerá en Render)
-                    print(f"DEBUG: {nombre} compró {token_ca}. Operadores actuales en token: {ops}")
+                    print(f"LECTURA: {operador_encontrado} operó con {token_ca}. Equipo en token: {ops}")
 
                     if len(ops) >= 2:
-                        msg = (f"📦 *REPORTE DE LOGÍSTICA: CONFLUENCIA*\n\n"
-                               f"📂 *Token:* `{token_ca}`\n"
-                               f"👷 *Equipo:* {', '.join(ops)}\n"
+                        msg = (f"🚨 *CONFLUENCIA DETECTADA*\n\n"
+                               f"💎 *Token:* `{token_ca}`\n"
+                               f"👥 *Equipo:* {', '.join(ops)}\n"
                                f"🔗 [DexScreener](https://dexscreener.com/solana/{token_ca})")
                         enviar_telegram(msg)
+        
         return "OK", 200
-    return "Servidor Activo", 200
+    return "OK", 200
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=10000)
