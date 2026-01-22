@@ -41,6 +41,7 @@ def webhook():
     if not data:
         return "Sin datos", 400
 
+    # Procesar transacciones enviadas por Helius
     for tx in data:
         # Detectar intercambio (Swap)
         if 'events' in tx and 'swap' in tx['events']:
@@ -64,3 +65,25 @@ def webhook():
                 
                 # Obtener lista de operadores distintos en este token
                 operadores_activos = list(set(t['wallet'] for t in tracker[token_ca]))
+                
+                # SI HAY CONFLUENCIA (2 o más de tus billeteras)
+                if len(operadores_activos) >= 2:
+                    msg = (f"📦 *REPORTE DE LOGÍSTICA: PEDIDO DUPLICADO*\n\n"
+                           f"📂 *ID Lote:* `{token_ca}`\n"
+                           f"👷 *Personal:* {', '.join(operadores_activos)}\n"
+                           f"⏱️ *Estado:* Entrega Inmediata Confirmada\n\n"
+                           f"🔗 [Abrir Albarán](https://dexscreener.com/solana/{token_ca})")
+                    enviar_telegram(msg)
+                else:
+                    print(f"Movimiento detectado: {nombre_wallet} en lote {token_ca}")
+
+    # RESPUESTA OBLIGATORIA PARA FLASK Y HELIUS
+    return "OK", 200
+
+@app.route('/')
+def health_check():
+    return "Servidor Logística Activo", 200
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
