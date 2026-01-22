@@ -19,7 +19,7 @@ WALLETS = {
 }
 
 tracker = defaultdict(list)
-tokens_en_seguimiento = set() # Guardar tokens 4-5 estrellas para avisar su venta
+tokens_en_seguimiento = set() 
 last_alert_time = {} 
 VENTANA_TIEMPO = 1800 
 SILENCIO_POST_ALERTA = 900 
@@ -39,16 +39,32 @@ def obtener_datos_token(address):
     return 0, 0, 0
 
 def calcular_prioridad(mcap, edad, ops_count, liq):
-    if mcap > 100_000_000 or mcap == 0: return 0, ""
+    # Filtro de seguridad básico
+    if mcap > 100_000_000 or mcap == 0 or liq == 0: return 0, ""
+    
     puntos = 0
+    ratio_liq = mcap / liq
+
+    # --- FILTRO 1: RATIO DE LIQUIDEZ (Anti-Caídas Instantáneas) ---
+    # Si el MCap es más de 5 veces la liquidez, el token es puro aire.
+    if ratio_liq > 5.5: return 1, "FILTRADO (LIQ FRÁGIL)"
+
+    # --- FILTRO 2: TECHO DE MARKET CAP ---
+    # Penalizamos tokens de más de $1M (como XOGE) porque duplicar es mucho más lento.
+    if mcap > 1_000_000:
+        puntos -= 30
+    elif mcap < 300_000:
+        puntos += 30 # Bonus para "Mooncats" pequeños
+
+    # --- FILTRO 3: EDAD Y CONFLUENCIA ---
     if edad < 60: puntos += 40
     elif edad < 1440: puntos += 20
-    if 30_000 < mcap < 1_500_000: puntos += 40
-    elif mcap < 10_000_000: puntos += 20
-    puntos += (ops_count * 10)
+    
+    puntos += (ops_count * 15)
 
-    if puntos >= 90: return 5, "⭐⭐⭐⭐⭐ (GEMA ALPHA)"
-    if puntos >= 70: return 4, "⭐⭐⭐⭐ (POTENCIAL ALTO)"
+    # --- CLASIFICACIÓN FINAL ---
+    if puntos >= 85: return 5, "⭐⭐⭐⭐⭐ (GEMA ALPHA)"
+    if puntos >= 65: return 4, "⭐⭐⭐⭐ (POTENCIAL ALTO)"
     return 1, "FILTRADO"
 
 def enviar_telegram(mensaje):
@@ -83,7 +99,7 @@ def webhook():
                             mcap, edad, liq = obtener_datos_token(token_ca)
                             estrellas, etiqueta = calcular_prioridad(mcap, edad, len(ops), liq)
                             
-                            if estrellas >= 4: # FILTRO ESTRICTO
+                            if estrellas >= 4: 
                                 last_alert_time[token_ca] = ahora
                                 tokens_en_seguimiento.add(token_ca) 
                                 alerta_liq = "🚨 *RIESGO DE LIQUIDEZ*" if liq < 10000 else ""
