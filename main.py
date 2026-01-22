@@ -77,7 +77,7 @@ def webhook():
                 else:
                     print(f"Movimiento detectado: {nombre_wallet} en lote {token_ca}")
 
-    # RESPUESTA OBLIGATORIA PARA FLASK Y HELIUS
+    # RESPUESTA OBLIGATORIA FUERA DEL BUCLE FOR
     return "OK", 200
 
 @app.route('/')
