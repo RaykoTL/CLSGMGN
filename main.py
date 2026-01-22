@@ -19,6 +19,7 @@ WALLETS = {
 }
 
 tracker = defaultdict(list)
+# Ahora solo se llenará si tú haces clic en el botón del mensaje
 tokens_en_seguimiento = set() 
 last_alert_time = {} 
 VENTANA_TIEMPO = 1800 
@@ -39,44 +40,66 @@ def obtener_datos_token(address):
     return 0, 0, 0
 
 def calcular_prioridad(mcap, edad, ops_count, liq):
-    # Filtro de seguridad básico
     if mcap > 100_000_000 or mcap == 0 or liq == 0: return 0, ""
-    
     puntos = 0
     ratio_liq = mcap / liq
 
-    # --- FILTRO 1: RATIO DE LIQUIDEZ (Anti-Caídas Instantáneas) ---
-    # Si el MCap es más de 5 veces la liquidez, el token es puro aire.
     if ratio_liq > 5.5: return 1, "FILTRADO (LIQ FRÁGIL)"
 
-    # --- FILTRO 2: TECHO DE MARKET CAP ---
-    # Penalizamos tokens de más de $1M (como XOGE) porque duplicar es mucho más lento.
-    if mcap > 1_000_000:
-        puntos -= 30
-    elif mcap < 300_000:
-        puntos += 30 # Bonus para "Mooncats" pequeños
+    if mcap > 1_000_000: puntos -= 30
+    elif mcap < 300_000: puntos += 30 
 
-    # --- FILTRO 3: EDAD Y CONFLUENCIA ---
     if edad < 60: puntos += 40
     elif edad < 1440: puntos += 20
     
     puntos += (ops_count * 15)
 
-    # --- CLASIFICACIÓN FINAL ---
     if puntos >= 85: return 5, "⭐⭐⭐⭐⭐ (GEMA ALPHA)"
     if puntos >= 65: return 4, "⭐⭐⭐⭐ (POTENCIAL ALTO)"
     return 1, "FILTRADO"
 
+def enviar_telegram_con_botones(mensaje, token_ca):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": mensaje,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+        "reply_markup": {
+            "inline_keyboard": [
+                [
+                    {"text": "🔔 Seguir Salidas", "callback_data": f"track_{token_ca}"},
+                    {"text": "📊 GMGN", "url": f"https://gmgn.ai/sol/token/{token_ca}"}
+                ],
+                [{"text": "❌ Ignorar", "callback_data": "ignore"}]
+            ]
+        }
+    }
+    try: requests.post(url, json=payload)
+    except: pass
+
 def enviar_telegram(mensaje):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown", "disable_web_page_preview": True})
+        requests.post(url, json={"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"})
     except: pass
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
     if request.method == 'POST':
         data = request.json
+
+        # --- MANEJO DE BOTONES INTERACTIVOS ---
+        if 'callback_query' in data:
+            callback = data['callback_query']
+            choice = callback['data']
+            if choice.startswith("track_"):
+                ca = choice.split("_")[1]
+                tokens_en_seguimiento.add(ca)
+                enviar_telegram(f"✅ *Seguimiento activado* para `{ca}`. Te avisaré si los operadores venden.")
+            return "OK", 200
+
+        # --- LÓGICA DE DETECCIÓN DE TXS ---
         for tx in data:
             comprador = tx.get('feePayer')
             if comprador not in WALLETS: continue
@@ -86,7 +109,10 @@ def webhook():
             if 'tokenTransfers' in tx:
                 for tf in tx['tokenTransfers']:
                     token_ca = tf.get('mint')
-                    if token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]: continue
+                    
+                    # FILTRO ANTI-SISTEMA Y ANTI-SOL (Para evitar errores de tus capturas)
+                    if token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "11111111111111111111111111111111"]: 
+                        continue
 
                     # LÓGICA DE COMPRA
                     if tf.get('toUserAccount') == comprador:
@@ -101,27 +127,24 @@ def webhook():
                             
                             if estrellas >= 4: 
                                 last_alert_time[token_ca] = ahora
-                                tokens_en_seguimiento.add(token_ca) 
-                                alerta_liq = "🚨 *RIESGO DE LIQUIDEZ*" if liq < 10000 else ""
                                 mcap_str = f"${mcap/1000000:.2f}M" if mcap > 1000000 else f"${mcap/1000:.1f}K"
                                 
                                 msg = (f"{etiqueta}\n━━━━━━━━━━━━━━━\n"
                                        f"💎 *Token:* `{token_ca}`\n"
                                        f"👥 *Equipo:* {', '.join(ops)}\n\n"
-                                       f"💰 *MCap:* {mcap_str} | 💧 *Liq:* ${liq:,.0f} {alerta_liq}\n"
-                                       f"⏳ *Edad:* {edad} min\n\n"
-                                       f"🛡️ [RugCheck](https://rugcheck.xyz/tokens/{token_ca})\n"
-                                       f"📊 [DexScreener](https://dexscreener.com/solana/{token_ca})")
-                                enviar_telegram(msg)
+                                       f"💰 *MCap:* {mcap_str} | 💧 *Liq:* ${liq:,.0f}\n"
+                                       f"⏳ *Edad:* {edad} min")
+                                
+                                enviar_telegram_con_botones(msg, token_ca)
                                 tracker[token_ca] = [] 
 
-                    # LÓGICA DE VENTA (ALERTA URGENTE)
+                    # LÓGICA DE VENTA (Solo si activaste el seguimiento manual)
                     if tf.get('fromUserAccount') == comprador:
                         if token_ca in tokens_en_seguimiento:
                             msg_v = (f"🚨🚨 *SALIDA URGENTE DETECTADA* 🚨🚨\n\n"
                                      f"👤 *El operador {nombre} acaba de VENDER.*\n"
                                      f"💎 *Token:* `{token_ca}`\n"
-                                     f"⚠️ *Acción:* Protege ganancias o cierra posición YA. La confluencia se está rompiendo.")
+                                     f"⚠️ *Acción:* La confluencia se está rompiendo.")
                             enviar_telegram(msg_v)
         
         return "OK", 200
