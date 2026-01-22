@@ -6,7 +6,7 @@ from collections import defaultdict
 
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN PERSONALIZADA ---
+# --- CONFIGURACIÓN ---
 TOKEN = "8332101681:AAEbroUVbM_DkjhcuK-3onb095PpmFuCeyU"
 CHAT_ID = "6120143616"
 
@@ -19,7 +19,8 @@ WALLETS = {
 }
 
 tracker = defaultdict(list)
-VENTANA_TIEMPO = 600
+# Aumentamos a 1200 segundos (20 minutos) para no perder confluencias lentas
+VENTANA_TIEMPO = 1200 
 
 def enviar_telegram(mensaje):
     try:
@@ -27,47 +28,47 @@ def enviar_telegram(mensaje):
         payload = {"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error enviando a Telegram: {e}")
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
-    # --- PARTE NUEVA: RESPUESTA A TUS MENSAJES ---
     if request.method == 'POST':
         data = request.json
-        if not data:
-            return "OK", 200
+        if not data: return "OK", 200
 
-        # Si el mensaje viene de Telegram (cuando tú le escribes)
+        # Respuesta a mensajes manuales
         if "message" in data:
-            user_text = data["message"].get("text", "")
-            enviar_telegram(f"✅ *Sistema de Logística Operativo*\n\nEstoy vigilando {len(WALLETS)} carteras. Te avisaré cuando haya duplicados.")
+            enviar_telegram("✅ *Sistema Activo*\nVentana: 20 min.\nCarteras: 5")
             return "OK", 200
 
-        # Si el mensaje viene de Helius (datos de la blockchain)
         for tx in data:
             if 'events' in tx and 'swap' in tx['events']:
                 swap = tx['events']['swap']
                 token_ca = swap.get('tokenOutMint')
+                
+                # Filtro: Solo compras con SOL
                 if swap.get('tokenInMint') == "So11111111111111111111111111111111111111112":
-                    comprador_addr = tx.get('feePayer')
-                    nombre_wallet = WALLETS.get(comprador_addr, "OP_DESCONOCIDO")
+                    comprador = tx.get('feePayer')
+                    nombre = WALLETS.get(comprador, "OP_DESCONOCIDO")
                     ahora = time.time()
-                    tracker[token_ca].append({'wallet': nombre_wallet, 'time': ahora})
+
+                    # GUARDAR Y LIMPIAR
+                    tracker[token_ca].append({'wallet': nombre, 'time': ahora})
                     tracker[token_ca] = [t for t in tracker[token_ca] if ahora - t['time'] < VENTANA_TIEMPO]
-                    operadores_activos = list(set(t['wallet'] for t in tracker[token_ca]))
                     
-                    if len(operadores_activos) >= 2:
-                        msg = (f"📦 *REPORTE DE LOGÍSTICA: PEDIDO DUPLICADO*\n\n"
-                               f"📂 *ID Lote:* `{token_ca}`\n"
-                               f"👷 *Personal:* {', '.join(operadores_activos)}\n"
-                               f"🔗 [Abrir Albarán](https://dexscreener.com/solana/{token_ca})")
+                    ops = list(set(t['wallet'] for t in tracker[token_ca]))
+                    
+                    # LOG PARA REVISIÓN (Aparecerá en Render)
+                    print(f"DEBUG: {nombre} compró {token_ca}. Operadores actuales en token: {ops}")
+
+                    if len(ops) >= 2:
+                        msg = (f"📦 *REPORTE DE LOGÍSTICA: CONFLUENCIA*\n\n"
+                               f"📂 *Token:* `{token_ca}`\n"
+                               f"👷 *Equipo:* {', '.join(ops)}\n"
+                               f"🔗 [DexScreener](https://dexscreener.com/solana/{token_ca})")
                         enviar_telegram(msg)
         return "OK", 200
     return "Servidor Activo", 200
-
-@app.route('/')
-def health_check():
-    return "Servidor Logística Activo", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
