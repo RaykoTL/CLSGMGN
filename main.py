@@ -19,11 +19,14 @@ WALLETS = {
 }
 
 tracker = defaultdict(list)
-# Ahora solo se llenará si tú haces clic en el botón del mensaje
 tokens_en_seguimiento = set() 
 last_alert_time = {} 
+# NUEVO: Para evitar el spam de ventas repetidas
+last_sell_alert = {} 
+
 VENTANA_TIEMPO = 1800 
 SILENCIO_POST_ALERTA = 900 
+SILENCIO_VENTA = 600 # 10 minutos de silencio tras avisar una venta del mismo OP
 
 def obtener_datos_token(address):
     try:
@@ -45,13 +48,10 @@ def calcular_prioridad(mcap, edad, ops_count, liq):
     ratio_liq = mcap / liq
 
     if ratio_liq > 5.5: return 1, "FILTRADO (LIQ FRÁGIL)"
-
     if mcap > 1_000_000: puntos -= 30
     elif mcap < 300_000: puntos += 30 
-
     if edad < 60: puntos += 40
     elif edad < 1440: puntos += 20
-    
     puntos += (ops_count * 15)
 
     if puntos >= 85: return 5, "⭐⭐⭐⭐⭐ (GEMA ALPHA)"
@@ -75,31 +75,26 @@ def enviar_telegram_con_botones(mensaje, token_ca):
             ]
         }
     }
-    try: requests.post(url, json=payload)
-    except: pass
+    requests.post(url, json=payload)
 
 def enviar_telegram(mensaje):
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"})
-    except: pass
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    requests.post(url, json={"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"})
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
     if request.method == 'POST':
         data = request.json
 
-        # --- MANEJO DE BOTONES INTERACTIVOS ---
         if 'callback_query' in data:
             callback = data['callback_query']
             choice = callback['data']
             if choice.startswith("track_"):
                 ca = choice.split("_")[1]
                 tokens_en_seguimiento.add(ca)
-                enviar_telegram(f"✅ *Seguimiento activado* para `{ca}`. Te avisaré si los operadores venden.")
+                enviar_telegram(f"✅ *Seguimiento activado* para `{ca}`.")
             return "OK", 200
 
-        # --- LÓGICA DE DETECCIÓN DE TXS ---
         for tx in data:
             comprador = tx.get('feePayer')
             if comprador not in WALLETS: continue
@@ -110,11 +105,10 @@ def webhook():
                 for tf in tx['tokenTransfers']:
                     token_ca = tf.get('mint')
                     
-                    # FILTRO ANTI-SISTEMA Y ANTI-SOL (Para evitar errores de tus capturas)
                     if token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "11111111111111111111111111111111"]: 
                         continue
 
-                    # LÓGICA DE COMPRA
+                    # --- LÓGICA DE COMPRA ---
                     if tf.get('toUserAccount') == comprador:
                         if token_ca in last_alert_time and ahora - last_alert_time[token_ca] < SILENCIO_POST_ALERTA: continue
                         tracker[token_ca].append({'wallet': nombre, 'time': ahora})
@@ -128,23 +122,29 @@ def webhook():
                             if estrellas >= 4: 
                                 last_alert_time[token_ca] = ahora
                                 mcap_str = f"${mcap/1000000:.2f}M" if mcap > 1000000 else f"${mcap/1000:.1f}K"
-                                
                                 msg = (f"{etiqueta}\n━━━━━━━━━━━━━━━\n"
                                        f"💎 *Token:* `{token_ca}`\n"
                                        f"👥 *Equipo:* {', '.join(ops)}\n\n"
                                        f"💰 *MCap:* {mcap_str} | 💧 *Liq:* ${liq:,.0f}\n"
                                        f"⏳ *Edad:* {edad} min")
-                                
                                 enviar_telegram_con_botones(msg, token_ca)
                                 tracker[token_ca] = [] 
 
-                    # LÓGICA DE VENTA (Solo si activaste el seguimiento manual)
+                    # --- LÓGICA DE VENTA (CON ANTI-SPAM) ---
                     if tf.get('fromUserAccount') == comprador:
                         if token_ca in tokens_en_seguimiento:
-                            msg_v = (f"🚨🚨 *SALIDA URGENTE DETECTADA* 🚨🚨\n\n"
-                                     f"👤 *El operador {nombre} acaba de VENDER.*\n"
+                            # Creamos una llave única: "Token + NombreOperador"
+                            id_alerta = f"{token_ca}_{nombre}"
+                            
+                            # Si ya avisamos de este operador vendiendo este token hace menos de 10 min, ignoramos
+                            if id_alerta in last_sell_alert and ahora - last_sell_alert[id_alerta] < SILENCIO_VENTA:
+                                continue
+
+                            last_sell_alert[id_alerta] = ahora
+                            msg_v = (f"🚨🚨 *SALIDA DETECTADA* 🚨🚨\n\n"
+                                     f"👤 *El operador {nombre} está vendiendo.*\n"
                                      f"💎 *Token:* `{token_ca}`\n"
-                                     f"⚠️ *Acción:* La confluencia se está rompiendo.")
+                                     f"⚠️ *Acción:* Revisa tu posición.")
                             enviar_telegram(msg_v)
         
         return "OK", 200
