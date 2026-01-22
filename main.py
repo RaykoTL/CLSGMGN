@@ -6,6 +6,7 @@ from collections import defaultdict
 
 app = Flask(__name__)
 
+# --- CONFIGURACIÓN ---
 TOKEN = "8332101681:AAEbroUVbM_DkjhcuK-3onb095PpmFuCeyU"
 CHAT_ID = "6120143616"
 
@@ -18,7 +19,7 @@ WALLETS = {
 }
 
 tracker = defaultdict(list)
-VENTANA_TIEMPO = 1800 # Subimos a 30 minutos para mayor seguridad
+VENTANA_TIEMPO = 1800 # 30 minutos
 
 def enviar_telegram(mensaje):
     try:
@@ -32,44 +33,47 @@ def webhook():
         data = request.json
         if not data: return "OK", 200
         
-        # Respuesta manual
-        if "message" in data:
-            enviar_telegram("📡 *Radar Reforzado:* Activo y rastreando.")
+        # Respuesta manual para confirmar que vive
+        if isinstance(data, dict) and "message" in data:
+            enviar_telegram("📡 *Radar Nivel 3 Activo.*\nAnalizando flujos directos de tokens.")
             return "OK", 200
 
+        # Helius envía una lista de transacciones
         for tx in data:
-            # 1. Identificar si alguno de nuestros operadores está en la transacción
-            account_keys = [acc.get('pubkey') for acc in tx.get('accountData', [])]
-            operador_encontrado = None
-            for w_addr, w_nombre in WALLETS.items():
-                if w_addr in account_keys or tx.get('feePayer') == w_addr:
-                    operador_encontrado = w_nombre
-                    break
-            
-            if operador_encontrado:
-                # 2. Buscar qué token salió de la cuenta (Compra)
-                token_ca = None
-                if 'tokenTransfers' in tx:
-                    for transfer in tx['tokenTransfers']:
-                        # Si el operador es el que RECIBE el token, es una compra
-                        if transfer.get('toUserAccount') in account_keys or transfer.get('toUserAccount') == tx.get('feePayer'):
-                            token_ca = transfer.get('mint')
-                            break
+            # 1. ¿Quién es el responsable?
+            comprador = tx.get('feePayer')
+            if comprador not in WALLETS:
+                continue # Si no es uno de los nuestros, ignorar
                 
-                if token_ca:
-                    ahora = time.time()
-                    tracker[token_ca].append({'wallet': operador_encontrado, 'time': ahora})
-                    tracker[token_ca] = [t for t in tracker[token_ca] if ahora - t['time'] < VENTANA_TIEMPO]
-                    
-                    ops = list(set(t['wallet'] for t in tracker[token_ca]))
-                    print(f"LECTURA: {operador_encontrado} operó con {token_ca}. Equipo en token: {ops}")
+            nombre = WALLETS[comprador]
+            
+            # 2. Buscar transferencias de tokens HACIA el usuario (Compras)
+            if 'tokenTransfers' in tx:
+                for tf in tx['tokenTransfers']:
+                    # Si el token va hacia nuestra wallet, es una adquisición
+                    if tf.get('toUserAccount') == comprador:
+                        token_ca = tf.get('mint')
+                        # Ignorar SOL y USDC/USDT comunes
+                        if token_ca in ["So11111111111111111111111111111111111111112", "EPjFW36vn7J989kz5j1B1wvQ7bbjkneX9W8hzU31be52"]:
+                            continue
+                            
+                        ahora = time.time()
+                        tracker[token_ca].append({'wallet': nombre, 'time': ahora})
+                        
+                        # Limpiar antiguos
+                        tracker[token_ca] = [t for t in tracker[token_ca] if ahora - t['time'] < VENTANA_TIEMPO]
+                        
+                        ops = list(set(t['wallet'] for t in tracker[token_ca]))
+                        print(f"ALERTA INTERNA: {nombre} adquirió {token_ca}. Confluencia actual: {len(ops)}")
 
-                    if len(ops) >= 2:
-                        msg = (f"🚨 *CONFLUENCIA DETECTADA*\n\n"
-                               f"💎 *Token:* `{token_ca}`\n"
-                               f"👥 *Equipo:* {', '.join(ops)}\n"
-                               f"🔗 [DexScreener](https://dexscreener.com/solana/{token_ca})")
-                        enviar_telegram(msg)
+                        if len(ops) >= 2:
+                            msg = (f"🚨 *CONFLUENCIA DE ALTA PROBABILIDAD*\n\n"
+                                   f"💎 *Token:* `{token_ca}`\n"
+                                   f"👥 *Equipo:* {', '.join(ops)}\n"
+                                   f"🔗 [DexScreener](https://dexscreener.com/solana/{token_ca})")
+                            enviar_telegram(msg)
+                            # Limpiamos para no repetir la alerta cada segundo
+                            tracker[token_ca] = [] 
         
         return "OK", 200
     return "OK", 200
