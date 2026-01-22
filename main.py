@@ -85,7 +85,7 @@ def webhook():
                             
                             if estrellas >= 4: # FILTRO ESTRICTO
                                 last_alert_time[token_ca] = ahora
-                                tokens_en_seguimiento.add(token_ca) # Registrar para avisar venta luego
+                                tokens_en_seguimiento.add(token_ca) 
                                 alerta_liq = "🚨 *RIESGO DE LIQUIDEZ*" if liq < 10000 else ""
                                 mcap_str = f"${mcap/1000000:.2f}M" if mcap > 1000000 else f"${mcap/1000:.1f}K"
                                 
@@ -99,14 +99,14 @@ def webhook():
                                 enviar_telegram(msg)
                                 tracker[token_ca] = [] 
 
-                    # LÓGICA DE VENTA (Solo si el token fue detectado como Élite antes)
+                    # LÓGICA DE VENTA (ALERTA URGENTE)
                     if tf.get('fromUserAccount') == comprador:
                         if token_ca in tokens_en_seguimiento:
-                            msg_v = (f"⚠️ *SALIDA ÉLITE DETECTADA*\n"
-                                     f"👤 {nombre} está vendiendo `{token_ca}`\n"
-                                     f"📉 Considera tomar ganancias.")
+                            msg_v = (f"🚨🚨 *SALIDA URGENTE DETECTADA* 🚨🚨\n\n"
+                                     f"👤 *El operador {nombre} acaba de VENDER.*\n"
+                                     f"💎 *Token:* `{token_ca}`\n"
+                                     f"⚠️ *Acción:* Protege ganancias o cierra posición YA. La confluencia se está rompiendo.")
                             enviar_telegram(msg_v)
-                            # Opcional: tokens_en_seguimiento.remove(token_ca) si quieres dejar de seguirlo tras la primera venta
         
         return "OK", 200
     return "OK", 200
