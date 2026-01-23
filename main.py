@@ -20,7 +20,7 @@ tokens_en_seguimiento = {}
 last_alert_time = {} 
 last_sell_alert = {} 
 
-SILENCIO_COMPRA = 300  # 5 minutos para evitar spam si compra en varias partes
+SILENCIO_COMPRA = 600  # 10 minutos para evitar spam de compras parciales
 SILENCIO_VENTA = 300 
 
 def obtener_datos_token(address):
@@ -45,7 +45,6 @@ def enviar_telegram(mensaje, token_ca=None):
         "disable_web_page_preview": True
     }
     
-    # Si es una compra, añadimos botones útiles
     if token_ca:
         payload["reply_markup"] = {
             "inline_keyboard": [
@@ -56,59 +55,74 @@ def enviar_telegram(mensaje, token_ca=None):
             ]
         }
     
-    requests.post(url, json=payload)
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except: pass
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
     if request.method == 'POST':
-        data = request.json
-        ahora = time.time()
+        try:
+            data = request.json
+            if not isinstance(data, list):
+                return "OK", 200
 
-        for tx in data:
-            ejecutor = tx.get('feePayer')
-            if ejecutor not in WALLETS: continue
-            nombre = WALLETS[ejecutor]
+            ahora = time.time()
 
-            if 'tokenTransfers' in tx:
-                for tf in tx['tokenTransfers']:
-                    token_ca = tf.get('mint')
-                    # Filtrar SOL, USDC, etc.
-                    if token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]: 
-                        continue
+            for tx in data:
+                # SOLUCIÓN AL ERROR: Validar que tx sea un diccionario
+                if not isinstance(tx, dict):
+                    continue
+                
+                ejecutor = tx.get('feePayer')
+                if not ejecutor or ejecutor not in WALLETS: 
+                    continue
+                
+                nombre = WALLETS[ejecutor]
 
-                    # --- DETECTAR COMPRA ---
-                    if tf.get('toUserAccount') == ejecutor:
-                        id_compra = f"{token_ca}_{ejecutor}"
-                        if id_compra in last_alert_time and ahora - last_alert_time[id_compra] < SILENCIO_COMPRA:
+                if 'tokenTransfers' in tx and isinstance(tx['tokenTransfers'], list):
+                    for tf in tx['tokenTransfers']:
+                        token_ca = tf.get('mint')
+                        if not token_ca or token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]: 
                             continue
 
-                        mcap, liq, price = obtener_datos_token(token_ca)
-                        tokens_en_seguimiento[token_ca] = price
-                        last_alert_time[id_compra] = ahora
-                        
-                        mcap_str = f"${mcap/1000000:.2f}M" if mcap > 1000000 else f"${mcap/1000:.1f}K"
-                        
-                        msg = (f"🟢 *COMPRA DETECTADA*\n"
-                               f"👤 *Origen:* {nombre}\n"
-                               f"💎 *Token:* `{token_ca}`\n\n"
-                               f"💰 *MCap:* {mcap_str} | 💧 *Liq:* ${liq:,.0f}")
-                        enviar_telegram(msg, token_ca)
+                        # --- DETECTAR COMPRA ---
+                        if tf.get('toUserAccount') == ejecutor:
+                            id_compra = f"{token_ca}_{ejecutor}"
+                            if id_compra in last_alert_time and ahora - last_alert_time[id_compra] < SILENCIO_COMPRA:
+                                continue
 
-                    # --- DETECTAR VENTA ---
-                    elif tf.get('fromUserAccount') == ejecutor:
-                        id_venta = f"{token_ca}_{ejecutor}"
-                        if id_venta in last_sell_alert and ahora - last_sell_alert[id_venta] < SILENCIO_VENTA:
-                            continue
+                            mcap, liq, price = obtener_datos_token(token_ca)
+                            tokens_en_seguimiento[token_ca] = price
+                            last_alert_time[id_compra] = ahora
+                            
+                            mcap_str = f"${mcap/1000000:.2f}M" if mcap > 1000000 else f"${mcap/1000:.1f}K"
+                            
+                            msg = (f"🟢 *COMPRA DETECTADA*\n"
+                                   f"👤 *Origen:* {nombre}\n"
+                                   f"💎 *Token:* `{token_ca}`\n\n"
+                                   f"💰 *MCap:* {mcap_str} | 💧 *Liq:* ${liq:,.0f}")
+                            enviar_telegram(msg, token_ca)
 
-                        last_sell_alert[id_venta] = ahora
-                        msg_v = (f"🔴 *VENTA DETECTADA*\n"
-                                 f"👤 *Origen:* {nombre}\n"
-                                 f"💎 *Token:* `{token_ca}`\n"
-                                 f"⚠️ *Nota:* El operador está reduciendo posición.")
-                        enviar_telegram(msg_v)
+                        # --- DETECTAR VENTA ---
+                        elif tf.get('fromUserAccount') == ejecutor:
+                            id_venta = f"{token_ca}_{ejecutor}"
+                            if id_venta in last_sell_alert and ahora - last_sell_alert[id_venta] < SILENCIO_VENTA:
+                                continue
+
+                            last_sell_alert[id_venta] = ahora
+                            msg_v = (f"🔴 *VENTA DETECTADA*\n"
+                                     f"👤 *Origen:* {nombre}\n"
+                                     f"💎 *Token:* `{token_ca}`\n"
+                                     f"⚠️ *Nota:* El operador está reduciendo posición.")
+                            enviar_telegram(msg_v)
+        except Exception as e:
+            print(f"Error procesando webhook: {e}")
         
         return "OK", 200
     return "OK", 200
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    # Render usa el puerto 10000 por defecto
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
