@@ -9,18 +9,16 @@ app = Flask(__name__)
 TOKEN = "8332101681:AAEbroUVbM_DkjhcuK-3onb095PpmFuCeyU"
 CHAT_ID = "6120143616"
 
-# Solo las dos billeteras confirmadas
 WALLETS = {
     "3uuiw3YF1NCPYVc3FmCmg1DaBCPwQQVhzQYuz3PMXb9s": "ELITE PRINCIPAL (3uui)",
     "7xcyExghtNPWY4zzpgLXfgZsZ1CgW4DswuQipYn4b9ag": "ELITE SECUNDARIA (7xcy)"
 }
 
-# Diccionario para rastrear precios de entrada y gestionar alertas de venta
 tokens_en_seguimiento = {} 
 last_alert_time = {} 
 last_sell_alert = {} 
 
-SILENCIO_COMPRA = 600  # 10 minutos para evitar spam de compras parciales
+SILENCIO_COMPRA = 600  
 SILENCIO_VENTA = 300 
 
 def obtener_datos_token(address):
@@ -63,18 +61,24 @@ def enviar_telegram(mensaje, token_ca=None):
 def webhook():
     if request.method == 'POST':
         try:
-            data = request.json
-            if not isinstance(data, list):
+            # Forzamos la lectura como JSON, si falla devolvemos OK para no romper el flujo
+            data = request.get_json(silent=True)
+            
+            if not data or not isinstance(data, list):
                 return "OK", 200
 
             ahora = time.time()
 
             for tx in data:
-                # SOLUCIÓN AL ERROR: Validar que tx sea un diccionario
+                # SOLUCIÓN DEFINITIVA AL ERROR 'STR' OBJECT HAS NO ATTRIBUTE 'GET'
                 if not isinstance(tx, dict):
                     continue
                 
-                ejecutor = tx.get('feePayer')
+                try:
+                    ejecutor = tx.get('feePayer')
+                except Exception:
+                    continue
+
                 if not ejecutor or ejecutor not in WALLETS: 
                     continue
                 
@@ -82,6 +86,8 @@ def webhook():
 
                 if 'tokenTransfers' in tx and isinstance(tx['tokenTransfers'], list):
                     for tf in tx['tokenTransfers']:
+                        if not isinstance(tf, dict): continue
+                        
                         token_ca = tf.get('mint')
                         if not token_ca or token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]: 
                             continue
@@ -117,12 +123,11 @@ def webhook():
                                      f"⚠️ *Nota:* El operador está reduciendo posición.")
                             enviar_telegram(msg_v)
         except Exception as e:
-            print(f"Error procesando webhook: {e}")
+            print(f"Error crítico: {e}")
         
         return "OK", 200
     return "OK", 200
 
 if __name__ == '__main__':
-    # Render usa el puerto 10000 por defecto
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
