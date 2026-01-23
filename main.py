@@ -14,14 +14,13 @@ WALLETS = {
     "7xcyExghtNPWY4zzpgLXfgZsZ1CgW4DswuQipYn4b9ag": "ELITE SECUNDARIA (7xcy)"
 }
 
-# Estructura: { wallet_address: { token_ca: { 'balance': float, 'precio_promedio': float } } }
+# Estructura para tracking de profit
 portafolios = {w: {} for w in WALLETS}
-
 last_alert_time = {} 
 last_sell_alert = {} 
 
-SILENCIO_COMPRA = 600  
-SILENCIO_VENTA = 60   # Bajamos el silencio de venta para ver cierres parciales rápidos
+SILENCIO_COMPRA = 300  # 5 minutos
+SILENCIO_VENTA = 60    
 
 def obtener_datos_token(address):
     try:
@@ -44,7 +43,6 @@ def enviar_telegram(mensaje, token_ca=None):
         "parse_mode": "Markdown",
         "disable_web_page_preview": True
     }
-    
     if token_ca:
         payload["reply_markup"] = {
             "inline_keyboard": [[
@@ -52,7 +50,6 @@ def enviar_telegram(mensaje, token_ca=None):
                 {"text": "🎯 BullX", "url": f"https://neo.bullx.io/terminal?chain_id=137&address={token_ca}"}
             ]]
         }
-    
     try: requests.post(url, json=payload, timeout=5)
     except: pass
 
@@ -62,48 +59,46 @@ def webhook():
         try:
             data = request.get_json(silent=True)
             if not data or not isinstance(data, list): return "OK", 200
-
             ahora = time.time()
 
             for tx in data:
                 if not isinstance(tx, dict): continue
                 ejecutor = tx.get('feePayer')
                 if not ejecutor or ejecutor not in WALLETS: continue
-                
                 nombre = WALLETS[ejecutor]
 
                 if 'tokenTransfers' in tx and isinstance(tx['tokenTransfers'], list):
                     for tf in tx['tokenTransfers']:
                         if not isinstance(tf, dict): continue
-                        
                         token_ca = tf.get('mint')
-                        if not token_ca or token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]: 
+                        
+                        # Filtro básico de SOL y USDC
+                        if token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]: 
                             continue
 
                         cantidad = float(tf.get('tokenAmount', 0))
                         if cantidad == 0: continue
 
-                        # --- LÓGICA DE COMPRA ---
+                        # --- CAMBIO PARA MÁXIMA SENSIBILIDAD (COMPRA) ---
                         if tf.get('toUserAccount') == ejecutor:
-                            mcap, liq, price = obtener_datos_token(token_ca)
-                            
-                            # Actualizar portafolio interno
-                            if token_ca not in portafolios[ejecutor]:
-                                portafolios[ejecutor][token_ca] = {'balance': 0.0, 'precio_entrada': price}
-                            
-                            portafolios[ejecutor][token_ca]['balance'] += cantidad
-                            
                             id_compra = f"{token_ca}_{ejecutor}"
                             if id_compra in last_alert_time and ahora - last_alert_time[id_compra] < SILENCIO_COMPRA:
                                 continue
-
+                            
                             last_alert_time[id_compra] = ahora
+                            mcap, liq, price = obtener_datos_token(token_ca)
+                            
+                            # Registro en portafolio para profit tracking
+                            if token_ca not in portafolios[ejecutor]:
+                                portafolios[ejecutor][token_ca] = {'balance': 0.0, 'precio_entrada': price}
+                            portafolios[ejecutor][token_ca]['balance'] += cantidad
+
                             mcap_str = f"${mcap/1000000:.2f}M" if mcap > 1000000 else f"${mcap/1000:.1f}K"
                             
-                            msg = (f"🟢 *COMPRA DETECTADA*\n"
+                            msg = (f"🔥 *MOVIMIENTO DETECTADO (COMPRA)*\n"
                                    f"👤 *Origen:* {nombre}\n"
                                    f"💎 *Token:* `{token_ca}`\n"
-                                   f"💰 *MCap:* {mcap_str} | 💧 *Liq:* ${liq:,.0f}\n"
+                                   f"💰 *MCap:* {mcap_str if mcap > 0 else 'Nuevo/Buscando...'}\n"
                                    f"💵 *Precio:* ${price:.10f}")
                             enviar_telegram(msg, token_ca)
 
@@ -113,38 +108,29 @@ def webhook():
                             if id_venta in last_sell_alert and ahora - last_sell_alert[id_venta] < SILENCIO_VENTA:
                                 continue
 
+                            last_sell_alert[id_venta] = ahora
                             mcap, liq, precio_actual = obtener_datos_token(token_ca)
                             
-                            # Calcular % de la bolsa vendida
                             info = portafolios[ejecutor].get(token_ca, {'balance': 0, 'precio_entrada': 0})
                             total_antes = info['balance']
                             
-                            porcentaje_vendido = 0
-                            if total_antes > 0:
-                                porcentaje_vendido = (cantidad / total_antes) * 100
-                                portafolios[ejecutor][token_ca]['balance'] -= cantidad
+                            porcentaje_vendido = (cantidad / total_antes * 100) if total_antes > 0 else 0
+                            if total_antes > 0: portafolios[ejecutor][token_ca]['balance'] -= cantidad
                             
-                            # Calcular Profit %
-                            profit_pct = 0
-                            if info['precio_entrada'] > 0:
-                                profit_pct = ((precio_actual - info['precio_entrada']) / info['precio_entrada']) * 100
-
+                            profit_pct = ((precio_actual - info['precio_entrada']) / info['precio_entrada'] * 100) if info['precio_entrada'] > 0 else 0
                             emoji_profit = "🚀" if profit_pct > 0 else "📉"
-                            
-                            last_sell_alert[id_venta] = ahora
+
                             msg_v = (f"🔴 *VENTA DETECTADA*\n"
                                      f"👤 *Origen:* {nombre}\n"
                                      f"💎 *Token:* `{token_ca}`\n\n"
-                                     f"📊 *Porcentaje Vendido:* {porcentaje_vendido:.1f}%\n"
-                                     f"{emoji_profit} *Profit Actual:* {profit_pct:+.2f}%\n"
-                                     f"⚠️ *Nota:* Está reduciendo posición.")
+                                     f"📊 *Vendió:* {porcentaje_vendido:.1f}%\n"
+                                     f"{emoji_profit} *Profit:* {profit_pct:+.2f}%\n"
+                                     f"⚠️ *MCap Actual:* ${mcap/1000:.1f}K")
                             enviar_telegram(msg_v, token_ca)
                             
-                            # Si vendió más del 95%, limpiar token del portafolio
-                            if porcentaje_vendido > 95:
-                                portafolios[ejecutor].pop(token_ca, None)
+                            if porcentaje_vendido > 95: portafolios[ejecutor].pop(token_ca, None)
 
-        except Exception as e: print(f"Error: {e}")
+        except Exception as e: print(f"Error crítico: {e}")
         return "OK", 200
     return "OK", 200
 
