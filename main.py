@@ -19,14 +19,14 @@ WALLETS = {
 }
 
 tracker = defaultdict(list)
-tokens_en_seguimiento = set() 
+# Guardamos: { CA: {"precio_entrada": float, "equipo_original": list} }
+tokens_en_seguimiento = {} 
 last_alert_time = {} 
-# NUEVO: Para evitar el spam de ventas repetidas
 last_sell_alert = {} 
 
 VENTANA_TIEMPO = 1800 
 SILENCIO_POST_ALERTA = 900 
-SILENCIO_VENTA = 600 # 10 minutos de silencio tras avisar una venta del mismo OP
+SILENCIO_VENTA = 600 
 
 def obtener_datos_token(address):
     try:
@@ -36,24 +36,23 @@ def obtener_datos_token(address):
         if pair:
             mcap = pair.get('fdv', 0)
             liq = pair.get('liquidity', {}).get('usd', 0)
+            price = float(pair.get('priceUsd', 0))
             created_at = pair.get('pairCreatedAt', 0)
             edad_min = int((time.time() * 1000 - created_at) / 60000) if created_at else 0
-            return mcap, edad_min, liq
+            return mcap, edad_min, liq, price
     except: pass
-    return 0, 0, 0
+    return 0, 0, 0, 0
 
 def calcular_prioridad(mcap, edad, ops_count, liq):
     if mcap > 100_000_000 or mcap == 0 or liq == 0: return 0, ""
     puntos = 0
     ratio_liq = mcap / liq
-
     if ratio_liq > 5.5: return 1, "FILTRADO (LIQ FRÁGIL)"
     if mcap > 1_000_000: puntos -= 30
     elif mcap < 300_000: puntos += 30 
     if edad < 60: puntos += 40
     elif edad < 1440: puntos += 20
     puntos += (ops_count * 15)
-
     if puntos >= 85: return 5, "⭐⭐⭐⭐⭐ (GEMA ALPHA)"
     if puntos >= 65: return 4, "⭐⭐⭐⭐ (POTENCIAL ALTO)"
     return 1, "FILTRADO"
@@ -86,13 +85,19 @@ def webhook():
     if request.method == 'POST':
         data = request.json
 
+        # --- MANEJO DE SEGUIMIENTO (CALLBACK) ---
         if 'callback_query' in data:
             callback = data['callback_query']
             choice = callback['data']
             if choice.startswith("track_"):
                 ca = choice.split("_")[1]
-                tokens_en_seguimiento.add(ca)
-                enviar_telegram(f"✅ *Seguimiento activado* para `{ca}`.")
+                m, e, l, p_entrada = obtener_datos_token(ca)
+                # Guardamos info técnica para filtrar la salida después
+                tokens_en_seguimiento[ca] = {
+                    "precio_entrada": p_entrada,
+                    "equipo": list(set(t['wallet'] for t in tracker[ca]))
+                }
+                enviar_telegram(f"✅ *Seguimiento Técnico Activado* para `{ca}`.\nIgnoraré ruidos de bots y operadores externos.")
             return "OK", 200
 
         for tx in data:
@@ -104,9 +109,7 @@ def webhook():
             if 'tokenTransfers' in tx:
                 for tf in tx['tokenTransfers']:
                     token_ca = tf.get('mint')
-                    
-                    if token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "11111111111111111111111111111111"]: 
-                        continue
+                    if token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "11111111111111111111111111111111"]: continue
 
                     # --- LÓGICA DE COMPRA ---
                     if tf.get('toUserAccount') == comprador:
@@ -116,9 +119,8 @@ def webhook():
                         ops = list(set(t['wallet'] for t in tracker[token_ca]))
 
                         if len(ops) >= 2:
-                            mcap, edad, liq = obtener_datos_token(token_ca)
+                            mcap, edad, liq, price = obtener_datos_token(token_ca)
                             estrellas, etiqueta = calcular_prioridad(mcap, edad, len(ops), liq)
-                            
                             if estrellas >= 4: 
                                 last_alert_time[token_ca] = ahora
                                 mcap_str = f"${mcap/1000000:.2f}M" if mcap > 1000000 else f"${mcap/1000:.1f}K"
@@ -128,23 +130,31 @@ def webhook():
                                        f"💰 *MCap:* {mcap_str} | 💧 *Liq:* ${liq:,.0f}\n"
                                        f"⏳ *Edad:* {edad} min")
                                 enviar_telegram_con_botones(msg, token_ca)
-                                tracker[token_ca] = [] 
 
-                    # --- LÓGICA DE VENTA (CON ANTI-SPAM) ---
+                    # --- LÓGICA DE VENTA (TECNICA Y ANTI-BOT) ---
                     if tf.get('fromUserAccount') == comprador:
                         if token_ca in tokens_en_seguimiento:
-                            # Creamos una llave única: "Token + NombreOperador"
-                            id_alerta = f"{token_ca}_{nombre}"
+                            info_t = tokens_en_seguimiento[token_ca]
                             
-                            # Si ya avisamos de este operador vendiendo este token hace menos de 10 min, ignoramos
+                            # 1. FILTRO DE INTRUSO: Solo avisa si el que vende estaba en la señal original
+                            if nombre not in info_t['equipo']:
+                                continue
+
+                            # 2. FILTRO MENTALIDAD NASDAQ: Si el precio subió +20%, no entramos en pánico por una venta pequeña
+                            _, _, _, precio_actual = obtener_datos_token(token_ca)
+                            if precio_actual > (info_t['precio_entrada'] * 1.20):
+                                continue # Dejamos respirar para el TP largo de 100-120 puntos
+
+                            id_alerta = f"{token_ca}_{nombre}"
                             if id_alerta in last_sell_alert and ahora - last_sell_alert[id_alerta] < SILENCIO_VENTA:
                                 continue
 
                             last_sell_alert[id_alerta] = ahora
-                            msg_v = (f"🚨🚨 *SALIDA DETECTADA* 🚨🚨\n\n"
-                                     f"👤 *El operador {nombre} está vendiendo.*\n"
+                            msg_v = (f"📉 *ANÁLISIS TÉCNICO DE SALIDA*\n\n"
+                                     f"👤 {nombre} (Original) está vendiendo.\n"
+                                     f"💰 Precio cerca de entrada o debilidad.\n"
                                      f"💎 *Token:* `{token_ca}`\n"
-                                     f"⚠️ *Acción:* Revisa tu posición.")
+                                     f"⚠️ *Acción:* Considera proteger capital.")
                             enviar_telegram(msg_v)
         
         return "OK", 200
