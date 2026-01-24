@@ -9,52 +9,51 @@ app = Flask(__name__)
 TOKEN = "8332101681:AAEbroUVbM_DkjhcuK-3onb095PpmFuCeyU"
 CHAT_ID = "6120143616"
 
+# Wallets a monitorear
 WALLETS = {
     "3uuiw3YF1NCPYVc3FmCmg1DaBCPwQQVhzQYuz3PMXb9s": "ELITE PRINCIPAL (3uui)",
     "7xcyExghtNPWY4zzpgLXfgZsZ1CgW4DswuQipYn4b9ag": "ELITE SECUNDARIA (7xcy)"
 }
 
-# --- LISTA NEGRA (Stablecoins y Tokens que NO queremos) ---
+# Lista negra de tokens de infraestructura y stables (Para limpiar el ruido)
 BLACKLIST = [
-    "So11111111111111111111111111111111111111112", # Wrapped SOL
+    "So11111111111111111111111111111111111111112", # WSOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", # USDT
     "3NZ9J7Nkf6YDxU7W6dh4UTrUM3yW7jtJzQUeAJfFdgob", # WBTC
-    "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij", # WBTC (Helius variant)
+    "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij", # WBTC variant
     "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB", # USDS
     "AGFEByKWvUjB99mPr6is9E18vRk7Fv1WbtKnt7tAnYgy", # mSOL
-    "juno7u2H36pYShmRNcYvV38D8N86Xb2pAsE8V9HkRrj", # JitoSOL
-    "DezXAZ8z7Pnrn9BshJ6EAn8y78RgnX6yTzC8uS9iCHmd", # BONK (opcional, pero a veces satura)
+    "juno7u2H36pYShmRNcYvV38D8N86Xb2pAsE8V9HkRrj"  # JitoSOL
 ]
 
+# Diccionario para trackear el precio de entrada y balance
 portafolios = {w: {} for w in WALLETS}
-last_alert_time = {} 
-last_sell_alert = {} 
-
-SILENCIO_COMPRA = 60  # Reducido a 1 min para no perder re-buys rápidos de memecoins
-SILENCIO_VENTA = 30   
 
 def obtener_datos_token(address):
+    """Obtiene Market Cap y Precio de DexScreener"""
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
-        res = requests.get(url, timeout=5).json()
+        res = requests.get(url, timeout=3).json()
         pair = res.get('pairs', [])[0] if res.get('pairs') else None
         if pair:
             mcap = pair.get('fdv', 0)
-            liq = pair.get('liquidity', {}).get('usd', 0)
             price = float(pair.get('priceUsd', 0))
-            return mcap, liq, price
-    except: pass
-    return 0, 0, 0
+            return mcap, price
+    except:
+        pass
+    return 0, 0
 
 def enviar_telegram(mensaje, token_ca=None):
+    """Envía la alerta a Telegram con botones de análisis"""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID, 
         "text": mensaje, 
-        "parse_mode": "Markdown",
+        "parse_mode": "Markdown", 
         "disable_web_page_preview": True
     }
+    
     if token_ca:
         payload["reply_markup"] = {
             "inline_keyboard": [[
@@ -62,88 +61,84 @@ def enviar_telegram(mensaje, token_ca=None):
                 {"text": "🎯 BullX", "url": f"https://neo.bullx.io/terminal?chain_id=137&address={token_ca}"}
             ]]
         }
-    try: requests.post(url, json=payload, timeout=5)
-    except: pass
+    
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"Error enviando Telegram: {e}")
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
     if request.method == 'POST':
-        try:
-            data = request.get_json(silent=True)
-            if not data or not isinstance(data, list): return "OK", 200
-            ahora = time.time()
+        data = request.get_json(silent=True)
+        if not data or not isinstance(data, list):
+            return "OK", 200
 
-            for tx in data:
-                if not isinstance(tx, dict): continue
-                ejecutor = tx.get('feePayer')
-                if not ejecutor or ejecutor not in WALLETS: continue
-                nombre = WALLETS[ejecutor]
+        for tx in data:
+            # Identificar quién ejecuta la transacción
+            ejecutor = tx.get('feePayer')
+            if not ejecutor or ejecutor not in WALLETS:
+                continue
+            
+            nombre_wallet = WALLETS[ejecutor]
+            transfers = tx.get('tokenTransfers', [])
 
-                if 'tokenTransfers' in tx and isinstance(tx['tokenTransfers'], list):
-                    for tf in tx['tokenTransfers']:
-                        if not isinstance(tf, dict): continue
-                        token_ca = tf.get('mint')
-                        
-                        # FILTRO DE LISTA NEGRA (Memecoins solamente)
-                        if token_ca in BLACKLIST:
-                            continue
+            for tf in transfers:
+                token_ca = tf.get('mint')
+                
+                # Omitir si el token está en la lista negra (USDC, SOL, etc.)
+                if not token_ca or token_ca in BLACKLIST:
+                    continue
+                
+                cantidad = float(tf.get('tokenAmount', 0))
+                if cantidad == 0:
+                    continue
 
-                        cantidad = float(tf.get('tokenAmount', 0))
-                        if cantidad == 0: continue
+                # Obtener datos de mercado en tiempo real
+                mcap, precio_actual = obtener_datos_token(token_ca)
+                mcap_str = f"${mcap/1000000:.2f}M" if mcap > 1000000 else f"${mcap/1000:.1f}K"
 
-                        # --- DETECCIÓN DE COMPRA ---
-                        if tf.get('toUserAccount') == ejecutor:
-                            id_compra = f"{token_ca}_{ejecutor}"
-                            if id_compra in last_alert_time and ahora - last_alert_time[id_compra] < SILENCIO_COMPRA:
-                                continue
-                            
-                            last_alert_time[id_compra] = ahora
-                            mcap, liq, price = obtener_datos_token(token_ca)
-                            
-                            if token_ca not in portafolios[ejecutor]:
-                                portafolios[ejecutor][token_ca] = {'balance': 0.0, 'precio_entrada': price}
-                            portafolios[ejecutor][token_ca]['balance'] += cantidad
+                # --- LÓGICA DE COMPRA ---
+                if tf.get('toUserAccount') == ejecutor:
+                    # Guardar en memoria para calcular profit luego
+                    if token_ca not in portafolios[ejecutor]:
+                        portafolios[ejecutor][token_ca] = {'balance': 0.0, 'entrada': precio_actual}
+                    
+                    portafolios[ejecutor][token_ca]['balance'] += cantidad
+                    
+                    msg = (f"🟢 *COMPRA DETECTADA*\n"
+                           f"👤 *Origen:* {nombre_wallet}\n"
+                           f"💎 *Token:* `{token_ca}`\n"
+                           f"💰 *MCap:* {mcap_str}\n"
+                           f"💵 *Precio:* ${precio_actual:.10f}")
+                    enviar_telegram(msg, token_ca)
 
-                            mcap_str = f"${mcap/1000000:.2f}M" if mcap > 1000000 else f"${mcap/1000:.1f}K"
-                            
-                            msg = (f"🟢 *COMPRA DE MEMECOIN*\n"
-                                   f"👤 *Origen:* {nombre}\n"
-                                   f"💎 *Token:* `{token_ca}`\n"
-                                   f"💰 *MCap:* {mcap_str if mcap > 0 else 'Nuevo/Buscando...'}\n"
-                                   f"💵 *Precio:* ${price:.10f}")
-                            enviar_telegram(msg, token_ca)
+                # --- LÓGICA DE VENTA ---
+                elif tf.get('fromUserAccount') == ejecutor:
+                    info = portafolios[ejecutor].get(token_ca, {'balance': 0.0, 'entrada': 0.0})
+                    
+                    # Calcular Profit si tenemos registro de la compra
+                    if info['entrada'] > 0:
+                        profit_pct = ((precio_actual - info['entrada']) / info['entrada']) * 100
+                    else:
+                        profit_pct = 0.0
+                    
+                    emoji_p = "🚀" if profit_pct > 0 else "📉"
+                    
+                    msg = (f"🔴 *VENTA DETECTADA*\n"
+                           f"👤 *Origen:* {nombre_wallet}\n"
+                           f"💎 *Token:* `{token_ca}`\n\n"
+                           f"{emoji_p} *Profit:* {profit_pct:+.2f}%\n"
+                           f"💰 *MCap Actual:* {mcap_str}")
+                    enviar_telegram(msg, token_ca)
+                    
+                    # Si vende casi todo, limpiar memoria del token
+                    if cantidad >= info['balance'] * 0.9:
+                        portafolios[ejecutor].pop(token_ca, None)
 
-                        # --- DETECCIÓN DE VENTA ---
-                        elif tf.get('fromUserAccount') == ejecutor:
-                            id_venta = f"{token_ca}_{ejecutor}"
-                            if id_venta in last_sell_alert and ahora - last_sell_alert[id_venta] < SILENCIO_VENTA:
-                                continue
-
-                            last_sell_alert[id_venta] = ahora
-                            mcap, liq, precio_actual = obtener_datos_token(token_ca)
-                            
-                            info = portafolios[ejecutor].get(token_ca, {'balance': 0, 'precio_entrada': 0})
-                            total_antes = info['balance']
-                            
-                            porcentaje_vendido = (cantidad / total_antes * 100) if total_antes > 0 else 0
-                            if total_antes > 0: portafolios[ejecutor][token_ca]['balance'] -= cantidad
-                            
-                            profit_pct = ((precio_actual - info['precio_entrada']) / info['precio_entrada'] * 100) if info['precio_entrada'] > 0 else 0
-                            emoji_profit = "🚀" if profit_pct > 0 else "📉"
-
-                            msg_v = (f"🔴 *VENTA DE MEMECOIN*\n"
-                                     f"👤 *Origen:* {nombre}\n"
-                                     f"💎 *Token:* `{token_ca}`\n\n"
-                                     f"📊 *Vendió:* {porcentaje_vendido:.1f}%\n"
-                                     f"{emoji_profit} *Profit:* {profit_pct:+.2f}%\n"
-                                     f"⚠️ *MCap Actual:* ${mcap/1000:.1f}K")
-                            enviar_telegram(msg_v, token_ca)
-                            
-                            if porcentaje_vendido > 95: portafolios[ejecutor].pop(token_ca, None)
-
-        except Exception as e: print(f"Error crítico: {e}")
         return "OK", 200
-    return "OK", 200
+    
+    return "Servidor Activo", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
