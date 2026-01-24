@@ -14,13 +14,25 @@ WALLETS = {
     "7xcyExghtNPWY4zzpgLXfgZsZ1CgW4DswuQipYn4b9ag": "ELITE SECUNDARIA (7xcy)"
 }
 
-# Estructura para tracking de profit
+# --- LISTA NEGRA (Stablecoins y Tokens que NO queremos) ---
+BLACKLIST = [
+    "So11111111111111111111111111111111111111112", # Wrapped SOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", # USDT
+    "3NZ9J7Nkf6YDxU7W6dh4UTrUM3yW7jtJzQUeAJfFdgob", # WBTC
+    "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij", # WBTC (Helius variant)
+    "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB", # USDS
+    "AGFEByKWvUjB99mPr6is9E18vRk7Fv1WbtKnt7tAnYgy", # mSOL
+    "juno7u2H36pYShmRNcYvV38D8N86Xb2pAsE8V9HkRrj", # JitoSOL
+    "DezXAZ8z7Pnrn9BshJ6EAn8y78RgnX6yTzC8uS9iCHmd", # BONK (opcional, pero a veces satura)
+]
+
 portafolios = {w: {} for w in WALLETS}
 last_alert_time = {} 
 last_sell_alert = {} 
 
-SILENCIO_COMPRA = 300  # 5 minutos
-SILENCIO_VENTA = 60    
+SILENCIO_COMPRA = 60  # Reducido a 1 min para no perder re-buys rápidos de memecoins
+SILENCIO_VENTA = 30   
 
 def obtener_datos_token(address):
     try:
@@ -72,14 +84,14 @@ def webhook():
                         if not isinstance(tf, dict): continue
                         token_ca = tf.get('mint')
                         
-                        # Filtro básico de SOL y USDC
-                        if token_ca in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]: 
+                        # FILTRO DE LISTA NEGRA (Memecoins solamente)
+                        if token_ca in BLACKLIST:
                             continue
 
                         cantidad = float(tf.get('tokenAmount', 0))
                         if cantidad == 0: continue
 
-                        # --- CAMBIO PARA MÁXIMA SENSIBILIDAD (COMPRA) ---
+                        # --- DETECCIÓN DE COMPRA ---
                         if tf.get('toUserAccount') == ejecutor:
                             id_compra = f"{token_ca}_{ejecutor}"
                             if id_compra in last_alert_time and ahora - last_alert_time[id_compra] < SILENCIO_COMPRA:
@@ -88,21 +100,20 @@ def webhook():
                             last_alert_time[id_compra] = ahora
                             mcap, liq, price = obtener_datos_token(token_ca)
                             
-                            # Registro en portafolio para profit tracking
                             if token_ca not in portafolios[ejecutor]:
                                 portafolios[ejecutor][token_ca] = {'balance': 0.0, 'precio_entrada': price}
                             portafolios[ejecutor][token_ca]['balance'] += cantidad
 
                             mcap_str = f"${mcap/1000000:.2f}M" if mcap > 1000000 else f"${mcap/1000:.1f}K"
                             
-                            msg = (f"🔥 *MOVIMIENTO DETECTADO (COMPRA)*\n"
+                            msg = (f"🟢 *COMPRA DE MEMECOIN*\n"
                                    f"👤 *Origen:* {nombre}\n"
                                    f"💎 *Token:* `{token_ca}`\n"
                                    f"💰 *MCap:* {mcap_str if mcap > 0 else 'Nuevo/Buscando...'}\n"
                                    f"💵 *Precio:* ${price:.10f}")
                             enviar_telegram(msg, token_ca)
 
-                        # --- LÓGICA DE VENTA + PORCENTAJE + PROFIT ---
+                        # --- DETECCIÓN DE VENTA ---
                         elif tf.get('fromUserAccount') == ejecutor:
                             id_venta = f"{token_ca}_{ejecutor}"
                             if id_venta in last_sell_alert and ahora - last_sell_alert[id_venta] < SILENCIO_VENTA:
@@ -120,7 +131,7 @@ def webhook():
                             profit_pct = ((precio_actual - info['precio_entrada']) / info['precio_entrada'] * 100) if info['precio_entrada'] > 0 else 0
                             emoji_profit = "🚀" if profit_pct > 0 else "📉"
 
-                            msg_v = (f"🔴 *VENTA DETECTADA*\n"
+                            msg_v = (f"🔴 *VENTA DE MEMECOIN*\n"
                                      f"👤 *Origen:* {nombre}\n"
                                      f"💎 *Token:* `{token_ca}`\n\n"
                                      f"📊 *Vendió:* {porcentaje_vendido:.1f}%\n"
